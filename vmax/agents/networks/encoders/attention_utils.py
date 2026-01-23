@@ -108,7 +108,7 @@ class AttentionLayer(nn.Module):
     dropout: float = 0.0
 
     @nn.compact
-    def __call__(self, x: jax.Array, context=None, mask_k=None, mask_q=None, deterministic: bool = False) -> jax.Array:
+    def __call__(self, x: jax.Array, context=None, mask_k=None, mask_q=None, deterministic: bool = False, output_attentions: bool = False):
         """Perform attention on the input.
 
         Args:
@@ -117,9 +117,10 @@ class AttentionLayer(nn.Module):
             mask_k: Mask applied on the keys.
             mask_q: Mask applied on the queries.
             deterministic: If True, disables dropout.
+            output_attentions: If True, returns (output, attention_weights).
 
         Returns:
-            Output tensor after attention.
+            Output tensor after attention (and attention weights if requested).
 
         """
         # mask is on context(k)
@@ -140,15 +141,19 @@ class AttentionLayer(nn.Module):
             big_neg = jnp.finfo(jnp.float32).min
             sim = jnp.where(mask_q[:, :, None, None], sim, big_neg)
 
-        attn = nn.softmax(sim, axis=-2)  # -2 we kept h dim in matrix (could we merge h with b ?)
+        # Explainability: This is the matrix we want!
+        attn = nn.softmax(sim, axis=-2)  # -2 we kept h dim in matrix
+        
         out = jnp.einsum("b i j h, b j h d -> b i h d", attn, v)
         out = einops.rearrange(out, "b n h d -> b n (h d)", h=h)
 
         out = nn.Dense(x.shape[-1])(out)
         out = nn.Dropout(self.dropout)(out, deterministic=deterministic)
 
+        if output_attentions:
+            return out, attn
+            
         return out
-
 
 class LocalAttentionLayer(nn.Module):
     """Local attention layer that performs attention over a local neighborhood.

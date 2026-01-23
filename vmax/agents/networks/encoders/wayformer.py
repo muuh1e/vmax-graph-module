@@ -18,20 +18,7 @@ from vmax.agents.networks import encoders
 
 
 class WayformerAttention(nn.Module):
-    """Wayformer attention module.
-
-    This module performs attention using a latent representation and cross attention.
-
-    Args:
-        depth: Number of layers.
-        num_latents: Number of latent vectors.
-        num_heads: Number of attention heads.
-        head_features: Feature size per head.
-        ff_mult: Feedforward multiplier.
-        attn_dropout: Dropout factor in attention.
-        ff_dropout: Dropout factor in feedforward network.
-
-    """
+    """Wayformer attention module with Explainability support."""
 
     depth: int = 2
     num_latents: int = 32
@@ -42,15 +29,16 @@ class WayformerAttention(nn.Module):
     ff_dropout: float = 0.0
 
     @nn.compact
-    def __call__(self, x, mask=None):
+    def __call__(self, x, mask=None, output_attentions: bool = False):
         """Forward pass of the Wayformer attention module.
 
         Args:
             x: Input tensor.
             mask: Input mask.
+            output_attentions: Whether to return attention weights.
 
         Returns:
-            Output tensor.
+            Output tensor (and list of attention weights if output_attentions=True).
 
         """
         bs, dim = x.shape[0], x.shape[-1]
@@ -65,15 +53,40 @@ class WayformerAttention(nn.Module):
             dropout=self.attn_dropout,
         )
         ff = partial(encoders.FeedForward, mult=self.ff_mult, dropout=self.ff_dropout)
+        
+        collected_attentions = []
+
+        # Layer 0 (Cross Attention with Input)
         rz = encoders.ReZero(name="rezero_0")
-        latent += rz(attn(name="attn_0")(latent, x, mask_k=mask))
+        
+        # Call attention
+        attn_layer = attn(name="attn_0")
+        if output_attentions:
+            attn_out, attn_weights = attn_layer(latent, x, mask_k=mask, output_attentions=True)
+            collected_attentions.append(attn_weights)
+        else:
+            attn_out = attn_layer(latent, x, mask_k=mask)
+            
+        latent += rz(attn_out)
         latent += rz(ff(name="ff_0")(latent))
 
+        # Subsequent Layers (Self Attention)
         for i in range(1, self.depth):
             rz = encoders.ReZero(name=f"rezero_{i}")
-            latent += rz(attn(name=f"attn_{i}")(latent))
+            
+            attn_layer = attn(name=f"attn_{i}")
+            if output_attentions:
+                attn_out, attn_weights = attn_layer(latent, output_attentions=True)
+                collected_attentions.append(attn_weights)
+            else:
+                attn_out = attn_layer(latent)
+
+            latent += rz(attn_out)
             latent += rz(ff(name=f"ff_{i}")(latent))
 
+        if output_attentions:
+            return latent, collected_attentions
+            
         return latent
 
 
