@@ -1,0 +1,15 @@
+{
+  "model_type": "typed_gnn",
+  "hidden_channels": 128,
+  "num_layers": 3,
+  "dropout": 0.1,
+  "conv_type": "sage",
+  "use_edge_attr": false,
+  "num_future_steps": 80,
+  "use_a2a": true,
+  "use_a2l": true,
+  "use_l2a": true,
+  "use_l2l": false,
+  "use_a2tl": false,
+  "use_l2tl": false
+}

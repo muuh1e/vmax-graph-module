@@ -1,0 +1,71 @@
+2026-01-22 23:36:07.733726: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:477] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1769121367.748767   15435 cuda_dnn.cc:8310] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1769121367.753641   15435 cuda_blas.cc:1418] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2026-01-22 23:36:07.768535: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+Using device: cuda
+
+Loading dataset from /home/med1e/vmax/data/waymo_converted/training.tfrecord...
+Dataset size: 470 graphs
+Agent features: 66
+Lane features: 40
+Train size: 376
+Val size: 94
+Model parameters: 451,360
+
+============================================================
+Starting training...
+============================================================
+
+Epoch 1/1
+----------------------------------------
+Train:   0%|          | 0/188 [00:00<?, ?it/s]                                              DEBUG: Batch keys: <bound method BaseData.keys of HeteroDataBatch(
+  ego_idx=[2],
+  record_index=[2],
+  y=[65, 80, 2],
+  future_valid=[65, 80],
+  ego_future=[160, 2],
+  ego_x=[2],
+  ego_y=[2],
+  ego_yaw=[2],
+  roadgraph_ego=[4000, 2],
+  ego_future_target=[160, 2],
+  ego_future_valid=[160],
+  ego_idx_tensor=[2],
+  agent={
+    x=[65, 66],
+    batch=[65],
+    ptr=[3],
+  },
+  lane={
+    x=[90, 40],
+    batch=[90],
+    ptr=[3],
+  },
+  (agent, to, agent)={
+    edge_index=[2, 43],
+    edge_attr=[43, 20],
+  },
+  (agent, to, lane)={
+    edge_index=[2, 195],
+    edge_attr=[195, 9],
+  }
+)>
+DEBUG: Has ego_indices_global: False
+Traceback (most recent call last):
+  File "/home/med1e/vmax/V-Max/train.py", line 460, in <module>
+    main()
+  File "/home/med1e/vmax/V-Max/train.py", line 413, in main
+    train_loss, train_metrics = train_epoch(model, train_loader, optimizer, device)
+  File "/home/med1e/vmax/V-Max/train.py", line 145, in train_epoch
+    pred = model(batch)  # [batch, 80, 2]
+  File "/home/med1e/anaconda3/envs/vmax/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/med1e/anaconda3/envs/vmax/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/med1e/vmax/V-Max/simple_gnn.py", line 148, in forward
+    ego_indices = data.ego_indices_global  # [batch_size]
+  File "/home/med1e/anaconda3/envs/vmax/lib/python3.10/site-packages/torch_geometric/data/hetero_data.py", line 162, in __getattr__
+    raise AttributeError(f"'{self.__class__.__name__}' has no "
+AttributeError: 'HeteroDataBatch' has no attribute 'ego_indices_global'

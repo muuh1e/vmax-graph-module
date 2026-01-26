@@ -1,0 +1,17 @@
+# GNN Pipeline Dependencies
+torch>=2.0.0
+torch-geometric>=2.3.0
+torch-scatter
+torch-sparse
+torch-cluster
+torch-spline-conv
+numpy
+pandas
+tqdm
+matplotlib
+tensorboard
+protobuf>=3.20.0  # For TFRecord reading
+tensorflow-cpu    # For TFRecord reading (if needed by spatial_graph)
+# Optional but recommended
+hydra-core
+scikit-learn

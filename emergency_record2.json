@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "id": "ego",
+      "type": "EGO",
+      "attrs": {
+        "x": -1172.259033203125,
+        "y": 390.555419921875,
+        "yaw": 0.8460679650306702,
+        "speed_mps": 3.5980612598543362,
+        "speed_source": "computed"
+      }
+    }
+  ],
+  "edges": [],
+  "meta": {
+    "record_idx": 2,
+    "num_nodes": 1,
+    "num_edges": 0,
+    "emergency_extraction": true,
+    "traffic_lights": {
+      "total_valid": 0,
+      "num_clusters": 0,
+      "note": "EMERGENCY PATCH - ALL FILTERING DISABLED"
+    }
+  }
+}

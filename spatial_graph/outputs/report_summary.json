@@ -1,0 +1,107 @@
+{
+  "num_files": 100,
+  "nodes": {
+    "min": 6,
+    "max": 35,
+    "mean": 25.42,
+    "median": 26.0
+  },
+  "edges": {
+    "min": 5,
+    "max": 34,
+    "mean": 24.42,
+    "median": 25.0
+  },
+  "map": {
+    "raw_mean": 48.39,
+    "filtered_mean": 18.8,
+    "reduction_pct_mean": 46.60522374085421,
+    "reduction_pct_median": 58.75850340136054,
+    "safety_mean": 12.544303797468354,
+    "lane_mean": 3.7088607594936707,
+    "forward_mean": 36.79746835443038
+  },
+  "traffic_lights": {
+    "total_valid_mean": null,
+    "clusters_mean": null,
+    "cluster_reduction_pct_mean": null,
+    "control_confidence": {
+      "count": 462,
+      "min": 0.0,
+      "max": 0.9998999434480444,
+      "mean": 0.17370965339934724,
+      "median": 0.0
+    },
+    "must_stop_edges": {
+      "total": 0,
+      "mean_per_record": 0,
+      "records_with_any": 0
+    },
+    "stop_nearby_edges": {
+      "total": 0,
+      "mean_per_record": 0,
+      "records_with_any": 0
+    }
+  },
+  "node_type_counts": {
+    "EGO": 100,
+    "MAP_FEATURE": 1880,
+    "TRAFFIC_LIGHT_CLUSTER": 462,
+    "ROUTE": 100
+  },
+  "top_map_type_names": [
+    [
+      "SURFACE_STREET",
+      1077
+    ],
+    [
+      "ROAD_EDGE_MEDIAN",
+      192
+    ],
+    [
+      "SOLID_DOUBLE_YELLOW",
+      154
+    ],
+    [
+      "ROAD_EDGE_BOUNDARY",
+      152
+    ],
+    [
+      "SPEED_BUMP",
+      79
+    ],
+    [
+      "BIKE_LANE",
+      73
+    ],
+    [
+      "PASSING_DOUBLE_YELLOW",
+      55
+    ],
+    [
+      "BROKEN_SINGLE_YELLOW",
+      44
+    ],
+    [
+      "BROKEN_DOUBLE_YELLOW",
+      15
+    ],
+    [
+      "STOP_SIGN",
+      15
+    ],
+    [
+      "CROSSWALK",
+      14
+    ],
+    [
+      "SOLID_DOUBLE_WHITE",
+      8
+    ],
+    [
+      "UNKNOWN",
+      2
+    ]
+  ],
+  "bad_files": []
+}
