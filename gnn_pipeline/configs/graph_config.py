@@ -53,6 +53,12 @@ class GraphConfig:
         lane_max_count: Max number of lanes to keep
         lane_max_distance: Max distance from ego for lanes (meters)
         lane_drivable_only: Exclude non-drivable lanes
+        
+        # Enhanced edge features (Phase 1)
+        use_enhanced_a2a_features: Enable trajectory + interaction features (20→32 dims)
+        use_frenet_a2l_features: Enable Frenet coordinates for A2L (9→15 dims)
+        a2a_collision_threshold: Distance threshold for collision prediction (meters)
+        a2a_prediction_horizon: Time horizon for trajectory prediction (seconds)
     """
     
     # Node/edge inclusion flags (existing)
@@ -93,6 +99,12 @@ class GraphConfig:
     lane_max_count: int = 80
     lane_max_distance: float = 50.0
     lane_drivable_only: bool = False
+    
+    # Enhanced edge features (Phase 1)
+    use_enhanced_a2a_features: bool = True   # Enable trajectory + interaction features (20→32 dims)
+    use_frenet_a2l_features: bool = True     # Enable Frenet coordinates (9→15 dims)
+    a2a_collision_threshold: float = 3.0     # meters for collision prediction
+    a2a_prediction_horizon: float = 2.0      # seconds for trajectory prediction
     
     # -------------------------
     # Preset class methods

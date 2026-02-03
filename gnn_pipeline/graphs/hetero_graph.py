@@ -991,12 +991,180 @@ def build_l2tl_edges(
 
 
 # -----------------------------
+# Enhanced Edge Feature Helpers (Phase 1)
+# -----------------------------
+
+def compute_lateral_velocity(
+    agent_features: np.ndarray,
+    agent_idx: int,
+) -> float:
+    """
+    Compute velocity perpendicular to agent's heading direction.
+    
+    Args:
+        agent_features: [N, F] agent node features
+        agent_idx: Index of the agent
+        
+    Returns:
+        Lateral velocity in m/s (positive = moving left, negative = moving right)
+    """
+    vx = agent_features[agent_idx, 2]
+    vy = agent_features[agent_idx, 3]
+    yaw = agent_features[agent_idx, 4]
+    
+    # Perpendicular direction (left of heading)
+    perp_x = -np.sin(yaw)
+    perp_y = np.cos(yaw)
+    
+    return float(vx * perp_x + vy * perp_y)
+
+
+def compute_yaw_rate(
+    agent_features: np.ndarray,
+    agent_idx: int,
+    k_past: int = 10,
+    dt: float = 0.1,
+) -> float:
+    """
+    Compute angular velocity (yaw rate) from past trajectory.
+    
+    Uses past positions to estimate heading change over time.
+    Agent features layout: past_x at [16:16+k], past_y at [16+k:16+2k]
+    
+    Args:
+        agent_features: [N, F] agent node features
+        agent_idx: Index of the agent
+        k_past: Number of past timesteps in features
+        dt: Time step between samples (seconds)
+        
+    Returns:
+        Yaw rate in rad/s
+    """
+    # Extract past positions (last 2 valid points)
+    past_x_start = 16
+    past_y_start = 16 + k_past
+    past_valid_start = 16 + 4 * k_past
+    
+    past_x = agent_features[agent_idx, past_x_start:past_x_start + k_past]
+    past_y = agent_features[agent_idx, past_y_start:past_y_start + k_past]
+    past_valid = agent_features[agent_idx, past_valid_start:past_valid_start + k_past]
+    
+    # Find last two valid timesteps
+    valid_indices = np.where(past_valid > 0.5)[0]
+    if len(valid_indices) < 2:
+        return 0.0
+    
+    # Use positions to estimate heading at two timesteps
+    idx1 = valid_indices[-2]
+    idx2 = valid_indices[-1]
+    
+    # Current heading (from most recent movement)
+    dx = past_x[idx2] - past_x[idx1]
+    dy = past_y[idx2] - past_y[idx1]
+    
+    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+        return 0.0
+    
+    # If we have more history, compute heading change
+    if len(valid_indices) >= 3:
+        idx0 = valid_indices[-3]
+        dx_prev = past_x[idx1] - past_x[idx0]
+        dy_prev = past_y[idx1] - past_y[idx0]
+        
+        if abs(dx_prev) > 1e-6 or abs(dy_prev) > 1e-6:
+            yaw_curr = np.arctan2(dy, dx)
+            yaw_prev = np.arctan2(dy_prev, dx_prev)
+            
+            # Normalize angle difference to [-pi, pi]
+            dyaw = yaw_curr - yaw_prev
+            while dyaw > np.pi:
+                dyaw -= 2 * np.pi
+            while dyaw < -np.pi:
+                dyaw += 2 * np.pi
+            
+            time_diff = (idx2 - idx0) * dt
+            if time_diff > 1e-6:
+                return float(dyaw / time_diff)
+    
+    return 0.0
+
+
+def compute_predicted_distance(
+    pos_i: np.ndarray,
+    vel_i: np.ndarray,
+    pos_j: np.ndarray,
+    vel_j: np.ndarray,
+    dt: float,
+) -> float:
+    """
+    Compute predicted distance between two agents at future time dt.
+    
+    Uses constant velocity linear prediction.
+    
+    Args:
+        pos_i: [2] position of agent i
+        vel_i: [2] velocity of agent i
+        pos_j: [2] position of agent j
+        vel_j: [2] velocity of agent j
+        dt: Time in seconds for prediction
+        
+    Returns:
+        Predicted distance in meters
+    """
+    pred_pos_i = pos_i + vel_i * dt
+    pred_pos_j = pos_j + vel_j * dt
+    return float(np.linalg.norm(pred_pos_j - pred_pos_i))
+
+
+def compute_interaction_scores(
+    dx: float,
+    dy: float,
+    closing_speed: float,
+    lateral_vel_j_toward_i: float,
+) -> tuple:
+    """
+    Compute soft interaction type scores based on geometry and dynamics.
+    
+    Args:
+        dx: Relative x position (j - i) in ego frame
+        dy: Relative y position (j - i) in ego frame
+        closing_speed: Rate of approach (positive = approaching)
+        lateral_vel_j_toward_i: Agent j's lateral velocity toward i's position
+        
+    Returns:
+        (merging_score, yielding_score, cutting_in_score) all in [0, 1]
+    """
+    # Merging: different lanes, converging trajectories, similar longitudinal position
+    lateral_separation = abs(dy)
+    converging = closing_speed > 1.0 and lateral_separation > 2.0 and lateral_separation < 8.0
+    similar_longitudinal = abs(dx) < 10.0
+    merging_score = 1.0 if (converging and similar_longitudinal) else 0.0
+    
+    # Cutting-in: j has high lateral velocity toward i's lane
+    # sigmoid approximation: 1 / (1 + exp(-x))
+    x = lateral_vel_j_toward_i - 0.5  # threshold at 0.5 m/s
+    cutting_in_score = 1.0 / (1.0 + np.exp(-x * 4))  # scaled sigmoid
+    
+    # Yielding: based on relative position and simple right-of-way rules
+    # Vehicle on right has priority, or vehicle ahead has priority
+    j_on_right = 1.0 if dy < 0 else 0.0
+    j_ahead = 1.0 if dx > 0 else 0.0
+    yielding_score = 0.5 * j_on_right + 0.3 * j_ahead
+    
+    return float(merging_score), float(yielding_score), float(cutting_in_score)
+
+
+# -----------------------------
 # Edge construction
 # -----------------------------
 def _compute_a2a_edge_attrs(
     agent_features: np.ndarray,
     edge_index: np.ndarray,
     lane_width: float = 2.0,
+    use_enhanced: bool = True,
+    collision_threshold: float = 3.0,
+    prediction_horizon: float = 2.0,
+    k_past: int = 10,
 ) -> np.ndarray:
     """
     Compute A2A edge attributes for a given edge index.
@@ -1008,11 +1176,17 @@ def _compute_a2a_edge_attrs(
         agent_features: [N, F] agent node features
         edge_index: [2, E] source and destination indices
         lane_width: Width for same-lane detection
+        use_enhanced: If True, add Phase 1 enhanced features (20→32 dims)
+        collision_threshold: Distance threshold for collision prediction (meters)
+        prediction_horizon: Time horizon for trajectory prediction (seconds)
+        k_past: Number of past timesteps in agent features
         
     Returns:
-        edge_attr: [E, 20] edge attribute array
+        edge_attr: [E, 20] or [E, 32] edge attribute array
     """
-    N_EDGE_FEATURES = 20
+    N_BASE_FEATURES = 20
+    N_ENHANCED_FEATURES = 12
+    N_EDGE_FEATURES = N_BASE_FEATURES + (N_ENHANCED_FEATURES if use_enhanced else 0)
     
     if edge_index.shape[1] == 0:
         return np.zeros((0, N_EDGE_FEATURES), dtype=np.float32)
@@ -1074,6 +1248,7 @@ def _compute_a2a_edge_attrs(
         is_leading = 1.0 if (in_same_lane and dx > 0) else 0.0
         is_following = 1.0 if (in_same_lane and dx < 0) else 0.0
         
+        # Base features (20 dims)
         edge_attr = [
             dx, dy, dist,
             rel_vx, rel_vy, closing_speed,
@@ -1083,9 +1258,56 @@ def _compute_a2a_edge_attrs(
             is_approaching, is_moving_away,
             is_leading, is_following,
         ]
+        
+        # Enhanced features (12 additional dims)
+        if use_enhanced:
+            # Trajectory-based features (6 dims)
+            lateral_vel_i = compute_lateral_velocity(agent_features, i)
+            lateral_vel_j = compute_lateral_velocity(agent_features, j)
+            lateral_movement_i = np.sign(lateral_vel_i) if abs(lateral_vel_i) > 0.3 else 0.0
+            lateral_movement_j = np.sign(lateral_vel_j) if abs(lateral_vel_j) > 0.3 else 0.0
+            yaw_rate_i = compute_yaw_rate(agent_features, i, k_past=k_past)
+            yaw_rate_j = compute_yaw_rate(agent_features, j, k_past=k_past)
+            
+            # Predicted collision features (3 dims)
+            pos_i = np.array([src_x, src_y])
+            vel_i = np.array([src_vx, src_vy])
+            pos_j = np.array([x[j], y[j]])
+            vel_j = np.array([vx[j], vy[j]])
+            
+            pred_dist_1s = compute_predicted_distance(pos_i, vel_i, pos_j, vel_j, 1.0)
+            pred_dist_2s = compute_predicted_distance(pos_i, vel_i, pos_j, vel_j, prediction_horizon)
+            min_pred_dist = min(pred_dist_1s, pred_dist_2s)
+            will_collide = 1.0 if min_pred_dist < collision_threshold else 0.0
+            
+            # Semantic interaction type (3 dims)
+            # Compute j's lateral velocity toward i's position
+            if dist > 1e-6:
+                to_i_unit = np.array([-dx, -dy]) / dist
+                # Perpendicular to to_i direction
+                perp_to_i = np.array([-to_i_unit[1], to_i_unit[0]])
+                lateral_vel_j_toward_i = abs(np.dot(vel_j, perp_to_i))
+            else:
+                lateral_vel_j_toward_i = 0.0
+            
+            merging_score, yielding_score, cutting_in_score = compute_interaction_scores(
+                dx, dy, closing_speed, lateral_vel_j_toward_i
+            )
+            
+            # Append enhanced features
+            edge_attr.extend([
+                lateral_vel_i, lateral_vel_j,           # 20-21
+                lateral_movement_i, lateral_movement_j, # 22-23
+                yaw_rate_i, yaw_rate_j,                 # 24-25
+                pred_dist_1s, pred_dist_2s,             # 26-27
+                will_collide,                           # 28
+                merging_score, yielding_score, cutting_in_score,  # 29-31
+            ])
+        
         attr_list.append(edge_attr)
     
     return np.array(attr_list, dtype=np.float32)
+
 
 
 def build_a2a_edges(
@@ -1327,11 +1549,12 @@ def build_a2l_edges(
     lane_features: np.ndarray,
     lane_polylines: List[np.ndarray],
     k: int = 3,
+    use_frenet: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Build agent-to-lane edges (each agent to k nearest lanes).
 
-    Edge attributes (9 features):
+    Edge attributes (9 base features, 15 if use_frenet=True):
     - [0-1]: dx, dy (relative position to closest point on lane)
     - [2]: dist (distance to closest point)
     - [3]: lateral_offset (signed: positive = lane is left of agent)
@@ -1340,12 +1563,22 @@ def build_a2l_edges(
     - [6]: is_approaching_lane (1.0 if velocity points toward lane)
     - [7]: progress_along_lane (0 to 1)
     - [8]: angle_to_lane (atan2(dy, dx))
+    
+    Enhanced features (if use_frenet=True):
+    - [9]: s (longitudinal Frenet coordinate - meters from lane start)
+    - [10]: d (lateral Frenet coordinate - same as lateral_offset, for clarity)
+    - [11]: d_dot (lateral velocity in lane frame)
+    - [12]: v_longitudinal (velocity along lane direction)
+    - [13]: v_lateral (velocity perpendicular to lane)
+    - [14]: v_longitudinal_normalized (v_longitudinal / speed_limit)
 
     Returns:
         edge_index: [2, E] array
-        edge_attr: [E, 9] array with edge features
+        edge_attr: [E, 9] or [E, 15] array with edge features
     """
-    N_EDGE_FEATURES = 9
+    N_BASE_FEATURES = 9
+    N_FRENET_FEATURES = 6
+    N_EDGE_FEATURES = N_BASE_FEATURES + (N_FRENET_FEATURES if use_frenet else 0)
     N_agents = agent_features.shape[0]
     N_lanes = lane_features.shape[0]
 
@@ -1375,6 +1608,8 @@ def build_a2l_edges(
             poly = lane_polylines[j]
             if poly.shape[0] >= 2:
                 dist, closest_pt, progress, lane_heading = compute_closest_point_on_polyline(poly, query)
+                # Compute lane length for Frenet s coordinate
+                lane_length = float(np.sum(np.sqrt(np.sum(np.diff(poly, axis=0)**2, axis=1))))
             else:
                 # Fallback to lane centroid
                 cx, cy = lane_features[j, 0], lane_features[j, 1]
@@ -1382,13 +1617,14 @@ def build_a2l_edges(
                 dist = float(np.sqrt((cx - ax)**2 + (cy - ay)**2))
                 progress = 0.5
                 lane_heading = 0.0
+                lane_length = 10.0  # default
 
-            lane_info.append((j, dist, closest_pt, progress, lane_heading))
+            lane_info.append((j, dist, closest_pt, progress, lane_heading, lane_length))
 
         # Sort by distance and take k nearest
         lane_info.sort(key=lambda x: x[1])
 
-        for lane_idx, dist, closest_pt, progress, lane_heading in lane_info[:k]:
+        for lane_idx, dist, closest_pt, progress, lane_heading, lane_length in lane_info[:k]:
             # Relative position
             dx = closest_pt[0] - ax
             dy = closest_pt[1] - ay
@@ -1396,6 +1632,7 @@ def build_a2l_edges(
             # Lateral offset (signed distance: positive = lane is left)
             # Using cross product: lane_dir x agent_to_lane
             lane_dir = np.array([np.cos(lane_heading), np.sin(lane_heading)])
+            lane_perp = np.array([-np.sin(lane_heading), np.cos(lane_heading)])  # Left is positive
             to_lane = np.array([dx, dy])
             lateral_offset = float(lane_dir[0] * to_lane[1] - lane_dir[1] * to_lane[0])
 
@@ -1417,7 +1654,7 @@ def build_a2l_edges(
             # Angle to lane
             angle_to_lane = float(np.arctan2(dy, dx))
 
-            # Build edge attribute vector (9 features)
+            # Build base edge attribute vector (9 features)
             edge_attr = [
                 dx, dy,                  # 0-1
                 dist,                    # 2
@@ -1428,6 +1665,40 @@ def build_a2l_edges(
                 progress,                # 7
                 angle_to_lane,           # 8
             ]
+            
+            # Enhanced Frenet features (6 additional dims)
+            if use_frenet:
+                # s = longitudinal position along lane (meters)
+                s = progress * lane_length
+                
+                # d = lateral offset (already computed, but include for clarity in Frenet coords)
+                d = lateral_offset
+                
+                # d_dot = lateral velocity (rate of change of lateral offset)
+                vel = np.array([avx, avy])
+                d_dot = float(np.dot(vel, lane_perp))
+                
+                # Lane-relative velocity decomposition
+                v_longitudinal = float(np.dot(vel, lane_dir))
+                v_lateral = float(np.dot(vel, lane_perp))  # same as d_dot
+                
+                # Normalized longitudinal velocity (by speed limit if available)
+                # lane_features[lane_idx, 9] is speed_limit (normalized by 40.0)
+                speed_limit_norm = lane_features[lane_idx, 9] if lane_idx < lane_features.shape[0] else 0.0
+                speed_limit = speed_limit_norm * 40.0  # denormalize
+                if speed_limit > 1e-6:
+                    v_longitudinal_normalized = v_longitudinal / speed_limit
+                else:
+                    v_longitudinal_normalized = 0.0
+                
+                edge_attr.extend([
+                    s,                        # 9
+                    d,                        # 10
+                    d_dot,                    # 11
+                    v_longitudinal,           # 12
+                    v_lateral,                # 13
+                    v_longitudinal_normalized,  # 14
+                ])
 
             src_list.append(i)
             dst_list.append(lane_idx)
@@ -1649,7 +1920,16 @@ def build_hetero_graph(
         )
         # Build edge attributes using existing function
         a2a_edge_index_new = np.stack([a2a_src.numpy(), a2a_dst.numpy()], axis=0)
-        a2a_edge_attr = _compute_a2a_edge_attrs(agent_features, a2a_edge_index_new)
+        use_enhanced = getattr(config, 'use_enhanced_a2a_features', True)
+        collision_threshold = getattr(config, 'a2a_collision_threshold', 3.0)
+        prediction_horizon = getattr(config, 'a2a_prediction_horizon', 2.0)
+        a2a_edge_attr = _compute_a2a_edge_attrs(
+            agent_features, a2a_edge_index_new,
+            use_enhanced=use_enhanced,
+            collision_threshold=collision_threshold,
+            prediction_horizon=prediction_horizon,
+            k_past=k_past
+        )
         a2a_edge_index = a2a_edge_index_new
         a2a_relations = []  # Not computed for new modes
         
@@ -1665,7 +1945,16 @@ def build_hetero_graph(
             fov_angle=config.a2a_fov_angle
         )
         a2a_edge_index_new = np.stack([a2a_src.numpy(), a2a_dst.numpy()], axis=0)
-        a2a_edge_attr = _compute_a2a_edge_attrs(agent_features, a2a_edge_index_new)
+        use_enhanced = getattr(config, 'use_enhanced_a2a_features', True)
+        collision_threshold = getattr(config, 'a2a_collision_threshold', 3.0)
+        prediction_horizon = getattr(config, 'a2a_prediction_horizon', 2.0)
+        a2a_edge_attr = _compute_a2a_edge_attrs(
+            agent_features, a2a_edge_index_new,
+            use_enhanced=use_enhanced,
+            collision_threshold=collision_threshold,
+            prediction_horizon=prediction_horizon,
+            k_past=k_past
+        )
         a2a_edge_index = a2a_edge_index_new
         a2a_relations = []
         
@@ -1678,8 +1967,9 @@ def build_hetero_graph(
         )
 
     # Build A2L edges
+    use_frenet = getattr(config, 'use_frenet_a2l_features', True)
     a2l_edge_index, a2l_edge_attr = build_a2l_edges(
-        agent_features, lane_features, lane_polylines, k=a2l_k
+        agent_features, lane_features, lane_polylines, k=a2l_k, use_frenet=use_frenet
     )
 
     # Create HeteroData

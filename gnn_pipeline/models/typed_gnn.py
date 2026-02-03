@@ -174,6 +174,7 @@ class TypedHeteroGNN(BaseMotionPredictor):
         use_dilated_lanes: bool = True,
         dilated_scales: List[int] = [1, 2, 4, 8],
         num_interaction_types: int = 5,
+        a2a_edge_attr_dim: int = 20,  # NEW: configurable (20 for legacy, 32 for enhanced)
     ):
         super().__init__(num_future_steps=num_future_steps)
 
@@ -251,7 +252,7 @@ class TypedHeteroGNN(BaseMotionPredictor):
                 out_channels=hidden_channels,
                 num_interaction_types=num_interaction_types,
                 use_edge_attr=use_edge_attr,
-                edge_attr_dim=20,  # A2A edge features
+                edge_attr_dim=a2a_edge_attr_dim,  # Use configurable dimension
             )
             for _ in range(num_layers)
         ])
