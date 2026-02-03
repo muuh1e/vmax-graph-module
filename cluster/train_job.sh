@@ -60,7 +60,7 @@ fi
 cd "${PROJECT_ROOT}/gnn_pipeline/train"
 
 python run.py \
-  --model simple_gnn \
+  --model hierarchical_gnn \
   --graph_preset baseline \
   --tfrecord "${DATA_TFRECORD}" \
   --processed_dir "${PROCESSED_DIR}" \
