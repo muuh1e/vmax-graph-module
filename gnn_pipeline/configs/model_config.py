@@ -142,7 +142,11 @@ class ModelConfig:
         # Lane-to-traffic-light (only if graph has TLs)
         if self.use_l2tl and (graph_config.include_tl or graph_config.include_l2tl):
             edge_types.append(("lane", "to", "tl"))
-        
+
+        # Agent-to-goal (only if graph has goals)
+        if graph_config.include_goal:
+            edge_types.append(("agent", "to", "goal"))
+
         return edge_types
     
     def sync_with_graph_config(self, graph_config: GraphConfig) -> None:
