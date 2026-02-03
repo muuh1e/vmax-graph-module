@@ -105,6 +105,17 @@ class GraphConfig:
     use_frenet_a2l_features: bool = True     # Enable Frenet coordinates (9→15 dims)
     a2a_collision_threshold: float = 3.0     # meters for collision prediction
     a2a_prediction_horizon: float = 2.0      # seconds for trajectory prediction
+
+    # Polyline encoding (Phase 2C)
+    use_polyline_encoder: bool = False       # Store raw polylines for encoding
+    polyline_max_points: int = 20            # Max points per polyline
+    
+    # Goal/SDC path (Phase 2B)
+    include_goal: bool = False               # Enable goal nodes
+    goal_mode: str = "waypoints"             # "endpoint" or "waypoints"
+    goal_num_waypoints: int = 10             # Number of waypoints to keep
+    goal_waypoint_spacing: float = 5.0       # Meters between waypoints
+    goal_max_distance: float = 80.0          # Max distance from ego
     
     # -------------------------
     # Preset class methods
@@ -278,6 +289,8 @@ class GraphConfig:
             parts.append("a2tl")
         if self.include_l2tl and not self.include_tl:
             parts.append("l2tl")
+        if self.include_goal:
+            parts.append("goal")
         
         # Check if it's actually baseline
         if len(parts) == 1:
@@ -327,5 +340,9 @@ class GraphConfig:
         
         if self.include_l2tl or (self.include_tl and self.tl_connect_to in ["lanes", "both"]):
             edge_types.append(("tl", "controls", "lane"))
+        
+        # Goal edges (Phase 2B)
+        if self.include_goal:
+            edge_types.append(("agent", "to", "goal"))
         
         return edge_types

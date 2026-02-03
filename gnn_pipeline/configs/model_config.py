@@ -32,6 +32,14 @@ class ModelConfig:
         use_l2l: Use lane-to-lane edges
         use_a2tl: Use agent-to-traffic-light edges
         use_l2tl: Use lane-to-traffic-light edges
+        
+        # Temporal encoding (Phase 2A)
+        use_temporal_encoder: Use temporal encoder for agent history
+        temporal_encoder_type: Type of encoder ("transformer", "conv1d", "gru")
+        temporal_hidden_dim: Hidden dimension for temporal encoder
+        temporal_num_layers: Number of layers in temporal encoder
+        temporal_num_heads: Number of attention heads (transformer only)
+        temporal_dropout: Dropout rate for temporal encoder
     """
     
     # Model architecture
@@ -50,6 +58,20 @@ class ModelConfig:
     use_l2l: bool = False
     use_a2tl: bool = False
     use_l2tl: bool = False
+    
+    # Temporal encoding (Phase 2A)
+    use_temporal_encoder: bool = False  # Default False for backward compatibility
+    temporal_encoder_type: str = "transformer"  # "transformer", "conv1d", "gru"
+    temporal_hidden_dim: int = 64
+    temporal_num_layers: int = 2
+    temporal_num_heads: int = 4  # For transformer only
+    temporal_dropout: float = 0.1
+
+    # Polyline encoding (Phase 2C)
+    use_polyline_encoder: bool = False  # Use polyline encoder for lane geometry
+    polyline_encoder_type: str = "pointnet"  # "pointnet", "transformer", "conv1d"
+    polyline_hidden_dim: int = 64
+    polyline_num_layers: int = 3
     
     # -------------------------
     # Serialization methods

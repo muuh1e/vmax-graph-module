@@ -44,6 +44,14 @@ from spatial_graph.modules.polyline_grouper import (
 if TYPE_CHECKING:
     from ..configs import GraphConfig
 
+# Import goal builder (Phase 2B)
+from .goal_builder import (
+    GoalConfig,
+    build_goal_nodes,
+    build_agent_to_goal_edges,
+    extract_goal_from_future_trajectory,
+)
+
 
 # -----------------------------
 # Agent type encoding
@@ -1811,6 +1819,35 @@ def build_hetero_graph(
             lane_features = lane_features[lane_mask.numpy()]
             lane_polylines = [lane_polylines[i] for i, m in enumerate(lane_mask) if m]
 
+    # ============ Store raw polylines for polyline encoder (Phase 2C) ============
+    use_polyline_encoder = getattr(config, 'use_polyline_encoder', False)
+    polyline_max_points = getattr(config, 'polyline_max_points', 20)
+
+    polyline_points_list = None
+    polyline_masks_list = None
+
+    if use_polyline_encoder and len(lane_polylines) > 0:
+        polyline_points_list = []
+        polyline_masks_list = []
+
+        for poly in lane_polylines:
+            # poly is already in ego frame [N_pts, 2]
+            n_pts = poly.shape[0] if poly.shape[0] > 0 else 0
+
+            # Pad or truncate to polyline_max_points
+            if n_pts >= polyline_max_points:
+                pts_padded = poly[:polyline_max_points]
+                mask = np.ones(polyline_max_points, dtype=bool)
+            else:
+                pts_padded = np.zeros((polyline_max_points, 2), dtype=np.float32)
+                if n_pts > 0:
+                    pts_padded[:n_pts] = poly
+                mask = np.zeros(polyline_max_points, dtype=bool)
+                mask[:n_pts] = True
+
+            polyline_points_list.append(pts_padded)
+            polyline_masks_list.append(mask)
+
     # Build L2L edges based on l2l_mode
     l2l_mode = config.l2l_mode if hasattr(config, 'l2l_mode') else "all"
     typed_l2l_edges = {}  # Will hold typed edges if l2l_mode == "typed"
@@ -1972,6 +2009,47 @@ def build_hetero_graph(
         agent_features, lane_features, lane_polylines, k=a2l_k, use_frenet=use_frenet
     )
 
+    # ============ Goal Nodes (Phase 2B) ============
+    include_goal = getattr(config, 'include_goal', False)
+    
+    if include_goal:
+        # Build GoalConfig from graph config
+        goal_config = GoalConfig(
+            goal_mode=getattr(config, 'goal_mode', 'waypoints'),
+            num_waypoints=getattr(config, 'goal_num_waypoints', 10),
+            waypoint_spacing=getattr(config, 'goal_waypoint_spacing', 5.0),
+            max_distance=getattr(config, 'goal_max_distance', 80.0),
+        )
+        
+        # Extract goal waypoints from future trajectory (proxy for SDC path)
+        # Future trajectory is already in ego frame, need to convert back to world for consistency
+        # Actually, future_xy is in ego frame, so we can use it directly
+        goal_waypoints = extract_goal_from_future_trajectory(
+            future_xy, future_valid, ego_local_idx,
+            num_waypoints=goal_config.num_waypoints,
+        )
+        
+        # Goal waypoints are in ego frame (future_xy is in ego frame)
+        # For build_goal_nodes, we need world frame input, so we pass identity transform
+        # Actually simpler: pass ego frame points directly, with ego at origin and heading=0
+        ego_pos_identity = np.array([0.0, 0.0], dtype=np.float32)
+        ego_heading_identity = 0.0
+        
+        goal_features, goal_info = build_goal_nodes(
+            goal_waypoints, ego_pos_identity, ego_heading_identity, goal_config
+        )
+        
+        # Build ego → goal edges
+        a2g_edge_index, a2g_edge_attr = build_agent_to_goal_edges(
+            agent_features, ego_local_idx, goal_info
+        )
+    else:
+        # Empty goal components
+        goal_features = torch.zeros(0, 10, dtype=torch.float32)
+        goal_info = {'num_goals': 0, 'positions': np.array([], dtype=np.float32).reshape(0, 2)}
+        a2g_edge_index = torch.zeros(2, 0, dtype=torch.long)
+        a2g_edge_attr = torch.zeros(0, 5, dtype=torch.float32)
+
     # Create HeteroData
     data = HeteroData()
 
@@ -1979,6 +2057,15 @@ def build_hetero_graph(
     data['agent'].x = torch.from_numpy(agent_features)
     data['lane'].x = torch.from_numpy(lane_features)
     data['tl'].x = torch.from_numpy(tl_features)
+
+    # Store raw polylines for polyline encoder (Phase 2C)
+    if polyline_points_list is not None and len(polyline_points_list) > 0:
+        data['lane'].polyline_points = torch.tensor(
+            np.stack(polyline_points_list), dtype=torch.float32
+        )  # [N_lanes, max_points, 2]
+        data['lane'].polyline_mask = torch.tensor(
+            np.stack(polyline_masks_list), dtype=torch.bool
+        )  # [N_lanes, max_points]
 
     # Agent-to-agent edges
     data['agent', 'to', 'agent'].edge_index = torch.from_numpy(a2a_edge_index)
@@ -2009,6 +2096,11 @@ def build_hetero_graph(
     # Lane-to-traffic-light edges
     data['lane', 'to', 'tl'].edge_index = torch.from_numpy(l2tl_edge_index)
     data['lane', 'to', 'tl'].edge_attr = torch.from_numpy(l2tl_edge_attr)
+
+    # Goal nodes and agent→goal edges (Phase 2B)
+    data['goal'].x = goal_features if isinstance(goal_features, torch.Tensor) else torch.from_numpy(goal_features)
+    data['agent', 'to', 'goal'].edge_index = a2g_edge_index
+    data['agent', 'to', 'goal'].edge_attr = a2g_edge_attr
 
     # Store metadata
     data.ego_idx = ego_local_idx

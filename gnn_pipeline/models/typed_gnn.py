@@ -19,6 +19,8 @@ from . import register_model
 from .base_model import BaseMotionPredictor
 from .layers.lane_graph_network import LaneGraphNetwork, AgentLaneFusion
 from .layers.attention import CrossAttention
+from .layers.temporal_encoder import get_temporal_encoder
+from .layers.polyline_encoder import get_polyline_encoder
 
 
 class TypedA2AConv(nn.Module):
@@ -164,6 +166,7 @@ class TypedHeteroGNN(BaseMotionPredictor):
         agent_in_channels: int = 66,
         lane_in_channels: int = 40,
         tl_in_channels: int = 12,
+        goal_in_channels: int = 10,
         hidden_channels: int = 128,
         num_layers: int = 3,
         num_future_steps: int = 80,
@@ -175,6 +178,18 @@ class TypedHeteroGNN(BaseMotionPredictor):
         dilated_scales: List[int] = [1, 2, 4, 8],
         num_interaction_types: int = 5,
         a2a_edge_attr_dim: int = 20,  # NEW: configurable (20 for legacy, 32 for enhanced)
+        # Temporal encoder (Phase 2A)
+        use_temporal_encoder: bool = False,
+        temporal_encoder_type: str = "transformer",
+        temporal_hidden_dim: int = 64,
+        temporal_num_layers: int = 2,
+        temporal_num_heads: int = 4,
+        temporal_dropout: float = 0.1,
+        # Polyline encoder (Phase 2C)
+        use_polyline_encoder: bool = False,
+        polyline_encoder_type: str = "pointnet",
+        polyline_hidden_dim: int = 64,
+        polyline_num_layers: int = 3,
     ):
         super().__init__(num_future_steps=num_future_steps)
 
@@ -182,6 +197,8 @@ class TypedHeteroGNN(BaseMotionPredictor):
         self.num_layers = num_layers
         self.use_edge_attr = use_edge_attr
         self.use_dilated_lanes = use_dilated_lanes
+        self.use_temporal_encoder = use_temporal_encoder
+        self.use_polyline_encoder = use_polyline_encoder
 
         # Default edge types
         if edge_types is None:
@@ -193,25 +210,82 @@ class TypedHeteroGNN(BaseMotionPredictor):
         self.edge_types = edge_types
         self.has_tl = any("tl" in et for et in edge_types)
         self.has_l2l = any(et[0] == "lane" and et[2] == "lane" for et in edge_types)
+        self.has_goal = any("goal" in et for et in edge_types)
 
-        # ============ Node Encoders ============
-        self.agent_encoder = nn.Sequential(
-            nn.Linear(agent_in_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-        )
+        # ============ Temporal Encoder (Phase 2A) ============
+        if use_temporal_encoder:
+            # Agent history: [x, y, vx, vy, yaw, sin_yaw, cos_yaw] = 7 features per timestep
+            # But we also have base features [x,y,vx,vy,yaw,speed,...] = 16 at the start
+            # Past trajectory starts at index 16, with k_past*5 features
+            # For now we assume agent_in_channels = 16 + k_past*5 where k_past=10 -> 66
+            # The temporal encoder will encode the time-series portion
+            self.temporal_encoder = get_temporal_encoder(
+                encoder_type=temporal_encoder_type,
+                input_dim=5,  # [x, y, vx, vy, valid] per timestep from past trajectory
+                hidden_dim=temporal_hidden_dim,
+                output_dim=hidden_channels,
+                num_layers=temporal_num_layers,
+                num_heads=temporal_num_heads if temporal_encoder_type == "transformer" else 4,
+                dropout=temporal_dropout,
+            )
+            # Agent encoder takes: base features (16) + temporal encoding (hidden_channels)
+            agent_encoder_in = 16 + hidden_channels
+            self.agent_encoder = nn.Sequential(
+                nn.Linear(agent_encoder_in, hidden_channels),
+                nn.ReLU(),
+                nn.Linear(hidden_channels, hidden_channels),
+            )
+        else:
+            # Original: flatten history and encode
+            self.agent_encoder = nn.Sequential(
+                nn.Linear(agent_in_channels, hidden_channels),
+                nn.ReLU(),
+                nn.Linear(hidden_channels, hidden_channels),
+            )
 
-        self.lane_encoder = nn.Sequential(
-            nn.Linear(lane_in_channels, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, hidden_channels),
-        )
+        # ============ Polyline Encoder (Phase 2C) ============
+        if use_polyline_encoder:
+            self.polyline_encoder = get_polyline_encoder(
+                encoder_type=polyline_encoder_type,
+                input_dim=2,  # x, y per point
+                hidden_dim=polyline_hidden_dim,
+                output_dim=hidden_channels,
+                num_layers=polyline_num_layers,
+            )
+            # Lane encoder takes polyline embedding as input
+            self.lane_encoder = nn.Sequential(
+                nn.Linear(hidden_channels, hidden_channels),
+                nn.ReLU(),
+                nn.Linear(hidden_channels, hidden_channels),
+            )
+        else:
+            # Original lane encoder: aggregated features
+            self.lane_encoder = nn.Sequential(
+                nn.Linear(lane_in_channels, hidden_channels),
+                nn.ReLU(),
+                nn.Linear(hidden_channels, hidden_channels),
+            )
 
         if self.has_tl:
             self.tl_encoder = nn.Sequential(
                 nn.Linear(tl_in_channels, hidden_channels),
                 nn.ReLU(),
                 nn.Linear(hidden_channels, hidden_channels),
+            )
+
+        # ============ Goal Encoder (Phase 2B) ============
+        if self.has_goal:
+            self.goal_encoder = nn.Sequential(
+                nn.Linear(goal_in_channels, hidden_channels),
+                nn.ReLU(),
+                nn.Linear(hidden_channels, hidden_channels),
+            )
+            # Cross-attention from agent to goal
+            self.agent_goal_attention = CrossAttention(
+                query_dim=hidden_channels,
+                key_dim=hidden_channels,
+                hidden_dim=hidden_channels,
+                num_heads=4,
             )
 
         # ============ Lane Graph Network ============
@@ -383,13 +457,57 @@ class TypedHeteroGNN(BaseMotionPredictor):
             [batch_size, num_future_steps, 2] trajectory predictions
         """
         # ============ Encode Nodes ============
-        h_agent = self.agent_encoder(data['agent'].x)
-        h_lane = self.lane_encoder(data['lane'].x)
+        
+        if self.use_temporal_encoder:
+            # Agent features layout: [16 base] + [k_past*5 past trajectory]
+            # Base: [x, y, vx, vy, yaw, speed, length, width, type*8] = 16
+            # Past: [past_x*k, past_y*k, past_vx*k, past_vy*k, past_valid*k] where k=10
+            agent_x = data['agent'].x  # [N_agents, 66]
+            N_agents = agent_x.size(0)
+            
+            # Extract base features (first 16)
+            base_features = agent_x[:, :16]  # [N, 16]
+            
+            # Extract past trajectory (indices 16 onwards)
+            # Shape: [N, 50] where 50 = k_past(10) * 5 features
+            past_features = agent_x[:, 16:]  # [N, 50]
+            
+            # Reshape to [N, k_past, 5]
+            k_past = past_features.size(1) // 5
+            past_trajectory = past_features.view(N_agents, k_past, 5)  # [N, 10, 5]
+            
+            # Temporal encoding
+            h_temporal = self.temporal_encoder(past_trajectory)  # [N, hidden_channels]
+            
+            # Concatenate base features with temporal encoding
+            agent_combined = torch.cat([base_features, h_temporal], dim=-1)  # [N, 16 + hidden]
+            h_agent = self.agent_encoder(agent_combined)
+        else:
+            # Original path: flatten history and encode
+            h_agent = self.agent_encoder(data['agent'].x)
+
+        # ============ Encode Lanes ============
+        if self.use_polyline_encoder and hasattr(data['lane'], 'polyline_points'):
+            # Use polyline encoder (Phase 2C)
+            polyline_pts = data['lane'].polyline_points  # [N_lanes, max_pts, 2]
+            polyline_mask = data['lane'].polyline_mask   # [N_lanes, max_pts]
+
+            h_polyline = self.polyline_encoder(polyline_pts, polyline_mask)
+            h_lane = self.lane_encoder(h_polyline)
+        else:
+            # Original: use aggregated features
+            h_lane = self.lane_encoder(data['lane'].x)
 
         if self.has_tl and 'tl' in data.node_types and data['tl'].x.size(0) > 0:
             h_tl = self.tl_encoder(data['tl'].x)
         else:
             h_tl = None
+
+        # ============ Encode Goal Nodes (Phase 2B) ============
+        if self.has_goal and 'goal' in data.node_types and data['goal'].x.size(0) > 0:
+            h_goal = self.goal_encoder(data['goal'].x)
+        else:
+            h_goal = None
 
         # ============ Lane Graph Network ============
         if self.has_l2l:
@@ -424,6 +542,14 @@ class TypedHeteroGNN(BaseMotionPredictor):
                 )
                 h_agent = h_agent_new.squeeze(0)
                 h_lane = h_lane_new.squeeze(0)
+
+            # Agent-Goal Fusion (if goal exists)
+            if h_goal is not None and h_goal.size(0) > 0:
+                # Cross-attention: agents attend to goals
+                h_agent_from_goal = self.agent_goal_attention(
+                    h_agent.unsqueeze(0), h_goal.unsqueeze(0)
+                )
+                h_agent = h_agent + h_agent_from_goal.squeeze(0)
 
         # ============ Extract Ego Embeddings ============
         if ego_indices is not None:

@@ -174,6 +174,105 @@ def parse_args():
         action="store_true",
         help="Use edge attributes in message passing"
     )
+    
+    # Temporal encoder arguments (Phase 2A)
+    temporal_group = parser.add_argument_group("Temporal Encoder")
+    temporal_group.add_argument(
+        "--use_temporal_encoder",
+        action="store_true",
+        help="Use temporal encoder for agent history (Phase 2A)"
+    )
+    temporal_group.add_argument(
+        "--temporal_encoder_type",
+        type=str,
+        default="transformer",
+        choices=["transformer", "conv1d", "gru"],
+        help="Type of temporal encoder"
+    )
+    temporal_group.add_argument(
+        "--temporal_hidden_dim",
+        type=int,
+        default=64,
+        help="Hidden dimension for temporal encoder"
+    )
+    temporal_group.add_argument(
+        "--temporal_num_layers",
+        type=int,
+        default=2,
+        help="Number of layers in temporal encoder"
+    )
+    temporal_group.add_argument(
+        "--temporal_num_heads",
+        type=int,
+        default=4,
+        help="Number of attention heads for transformer temporal encoder"
+    )
+
+    # Polyline encoder arguments (Phase 2C)
+    polyline_group = parser.add_argument_group("Polyline Encoder")
+    polyline_group.add_argument(
+        "--use_polyline_encoder",
+        action="store_true",
+        help="Use polyline encoder for lane geometry (Phase 2C)"
+    )
+    polyline_group.add_argument(
+        "--polyline_encoder_type",
+        type=str,
+        default="pointnet",
+        choices=["pointnet", "transformer", "conv1d"],
+        help="Type of polyline encoder"
+    )
+    polyline_group.add_argument(
+        "--polyline_max_points",
+        type=int,
+        default=20,
+        help="Max points per lane polyline"
+    )
+    polyline_group.add_argument(
+        "--polyline_hidden_dim",
+        type=int,
+        default=64,
+        help="Hidden dimension for polyline encoder"
+    )
+    polyline_group.add_argument(
+        "--polyline_num_layers",
+        type=int,
+        default=3,
+        help="Number of layers in polyline encoder"
+    )
+
+    # Goal/SDC path arguments (Phase 2B)
+    goal_group = parser.add_argument_group("Goal Nodes")
+    goal_group.add_argument(
+        "--include_goal",
+        action="store_true",
+        help="Include goal/SDC path nodes (Phase 2B)"
+    )
+    goal_group.add_argument(
+        "--goal_mode",
+        type=str,
+        default="waypoints",
+        choices=["endpoint", "waypoints"],
+        help="Goal representation mode"
+    )
+    goal_group.add_argument(
+        "--goal_num_waypoints",
+        type=int,
+        default=10,
+        help="Number of goal waypoints (for waypoints mode)"
+    )
+    goal_group.add_argument(
+        "--goal_waypoint_spacing",
+        type=float,
+        default=5.0,
+        help="Spacing between goal waypoints in meters"
+    )
+    goal_group.add_argument(
+        "--goal_max_distance",
+        type=float,
+        default=80.0,
+        help="Max distance from ego for goal waypoints"
+    )
 
     # Training arguments
     train_group = parser.add_argument_group("Training")
@@ -294,6 +393,19 @@ def build_graph_config(args) -> GraphConfig:
     if args.lane_max is not None:
         config.lane_max_count = args.lane_max
 
+    # Apply Polyline encoder overrides (Phase 2C)
+    if args.use_polyline_encoder:
+        config.use_polyline_encoder = True
+        config.polyline_max_points = args.polyline_max_points
+
+    # Apply Goal overrides (Phase 2B)
+    if args.include_goal:
+        config.include_goal = True
+        config.goal_mode = args.goal_mode
+        config.goal_num_waypoints = args.goal_num_waypoints
+        config.goal_waypoint_spacing = args.goal_waypoint_spacing
+        config.goal_max_distance = args.goal_max_distance
+
     return config
 
 
@@ -306,6 +418,17 @@ def build_model_config(args, graph_config: GraphConfig) -> ModelConfig:
         dropout=args.dropout,
         conv_type=args.conv_type,
         use_edge_attr=args.use_edge_attr,
+        # Temporal encoder (Phase 2A)
+        use_temporal_encoder=args.use_temporal_encoder,
+        temporal_encoder_type=args.temporal_encoder_type,
+        temporal_hidden_dim=args.temporal_hidden_dim,
+        temporal_num_layers=args.temporal_num_layers,
+        temporal_num_heads=args.temporal_num_heads,
+        # Polyline encoder (Phase 2C)
+        use_polyline_encoder=args.use_polyline_encoder,
+        polyline_encoder_type=args.polyline_encoder_type,
+        polyline_hidden_dim=args.polyline_hidden_dim,
+        polyline_num_layers=args.polyline_num_layers,
     )
 
     # Sync edge type flags with graph config
@@ -366,10 +489,12 @@ def main():
     agent_in_channels = sample['agent'].x.shape[1]
     lane_in_channels = sample['lane'].x.shape[1]
     tl_in_channels = sample['tl'].x.shape[1] if sample['tl'].x.shape[0] > 0 else 12
+    goal_in_channels = sample['goal'].x.shape[1] if 'goal' in sample.node_types and sample['goal'].x.shape[0] > 0 else 10
 
     print(f"Agent features: {agent_in_channels}")
     print(f"Lane features: {lane_in_channels}")
     print(f"TL features: {tl_in_channels}")
+    print(f"Goal features: {goal_in_channels}")
 
     # Train/val split
     num_val = int(len(dataset) * args.val_split)
@@ -409,6 +534,7 @@ def main():
         agent_in_channels=agent_in_channels,
         lane_in_channels=lane_in_channels,
         tl_in_channels=tl_in_channels,
+        goal_in_channels=goal_in_channels,
     )
 
     num_params = sum(p.numel() for p in model.parameters())

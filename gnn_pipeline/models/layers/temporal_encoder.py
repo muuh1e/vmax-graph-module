@@ -1,4 +1,13 @@
-"""Temporal Transformer Encoder for agent history encoding."""
+"""
+Temporal encoders for agent trajectory history.
+
+Encodes [batch, T, feat_dim] -> [batch, hidden_dim]
+
+Provides three encoder types:
+- TemporalTransformerEncoder: HiVT-style transformer with positional encoding
+- TemporalConv1DEncoder: LaneGCN-style 1D CNN
+- TemporalGRUEncoder: GRU-based recurrent encoder
+"""
 
 import math
 from typing import Optional
@@ -19,7 +28,10 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
         pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        if d_model % 2 == 0:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
         pe = pe.unsqueeze(0)  # [1, max_len, d_model]
 
         self.register_buffer('pe', pe)
@@ -48,46 +60,46 @@ class TemporalTransformerEncoder(nn.Module):
 
     def __init__(
         self,
-        in_channels: int,
-        d_model: int = 128,
+        input_dim: int,
+        hidden_dim: int = 64,
+        output_dim: int = 128,
         num_layers: int = 2,
         num_heads: int = 4,
-        dim_feedforward: int = 256,
         dropout: float = 0.1,
         max_seq_len: int = 100,
-        pooling: str = "mean",  # "mean", "max", "cls", "last"
+        pooling: str = "last",  # "mean", "max", "cls", "last"
     ):
         """
         Args:
-            in_channels: Input feature dimension per timestep
-            d_model: Transformer hidden dimension
+            input_dim: Input feature dimension per timestep
+            hidden_dim: Transformer hidden dimension
+            output_dim: Output embedding dimension
             num_layers: Number of transformer encoder layers
             num_heads: Number of attention heads
-            dim_feedforward: Feedforward dimension
             dropout: Dropout rate
             max_seq_len: Maximum sequence length for positional encoding
             pooling: Pooling strategy ("mean", "max", "cls", "last")
         """
         super().__init__()
 
-        self.d_model = d_model
+        self.hidden_dim = hidden_dim
         self.pooling = pooling
 
         # Input projection
-        self.input_proj = nn.Linear(in_channels, d_model)
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
 
         # Positional encoding
-        self.pos_encoder = PositionalEncoding(d_model, max_seq_len, dropout)
+        self.pos_encoder = PositionalEncoding(hidden_dim, max_seq_len, dropout)
 
         # Optional CLS token
         if pooling == "cls":
-            self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+            self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
+            d_model=hidden_dim,
             nhead=num_heads,
-            dim_feedforward=dim_feedforward,
+            dim_feedforward=hidden_dim * 4,
             dropout=dropout,
             activation='gelu',
             batch_first=True,
@@ -97,8 +109,9 @@ class TemporalTransformerEncoder(nn.Module):
             num_layers=num_layers,
         )
 
-        # Layer norm for output
-        self.norm = nn.LayerNorm(d_model)
+        # Output projection
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+        self.norm = nn.LayerNorm(output_dim)
 
     def forward(
         self,
@@ -107,21 +120,21 @@ class TemporalTransformerEncoder(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            x: Input sequence [batch, seq_len, in_channels]
+            x: Input sequence [batch, seq_len, input_dim]
             mask: Optional validity mask [batch, seq_len], True = valid
 
         Returns:
-            Encoded sequence [batch, d_model]
+            Encoded sequence [batch, output_dim]
         """
         batch_size, seq_len, _ = x.shape
 
         # Project input
-        x = self.input_proj(x)  # [batch, seq_len, d_model]
+        x = self.input_proj(x)  # [batch, seq_len, hidden_dim]
 
         # Add CLS token if needed
         if self.pooling == "cls":
             cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-            x = torch.cat([cls_tokens, x], dim=1)  # [batch, seq_len+1, d_model]
+            x = torch.cat([cls_tokens, x], dim=1)  # [batch, seq_len+1, hidden_dim]
             if mask is not None:
                 # Prepend True for CLS token
                 cls_mask = torch.ones(batch_size, 1, dtype=torch.bool, device=mask.device)
@@ -160,40 +173,42 @@ class TemporalTransformerEncoder(nn.Module):
             else:
                 out = x.mean(dim=1)
 
+        # Output projection
+        out = self.output_proj(out)
         return self.norm(out)
 
 
-class TemporalCNNEncoder(nn.Module):
+class TemporalConv1DEncoder(nn.Module):
     """
-    1D CNN encoder for temporal sequences.
+    1D CNN encoder for temporal sequences (LaneGCN-style).
 
     Faster alternative to transformer for simpler patterns.
     """
 
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int = 128,
-        hidden_channels: int = 64,
+        input_dim: int,
+        hidden_dim: int = 64,
+        output_dim: int = 128,
+        num_layers: int = 3,
         kernel_size: int = 3,
-        num_layers: int = 2,
         dropout: float = 0.1,
     ):
         super().__init__()
 
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        
         layers = []
         for i in range(num_layers):
-            in_ch = in_channels if i == 0 else hidden_channels
-            out_ch = out_channels if i == num_layers - 1 else hidden_channels
-
             layers.extend([
-                nn.Conv1d(in_ch, out_ch, kernel_size, padding=kernel_size // 2),
+                nn.Conv1d(hidden_dim, hidden_dim, kernel_size, padding=kernel_size // 2),
                 nn.ReLU(),
                 nn.Dropout(dropout),
             ])
 
         self.conv = nn.Sequential(*layers)
-        self.pool = nn.AdaptiveMaxPool1d(1)
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+        self.norm = nn.LayerNorm(output_dim)
 
     def forward(
         self,
@@ -202,12 +217,15 @@ class TemporalCNNEncoder(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            x: [batch, seq_len, in_channels]
+            x: [batch, seq_len, input_dim]
             mask: Optional [batch, seq_len]
 
         Returns:
-            [batch, out_channels]
+            [batch, output_dim]
         """
+        # Project input
+        x = self.input_proj(x)  # [batch, seq_len, hidden_dim]
+        
         # Conv expects [batch, channels, seq_len]
         x = x.transpose(1, 2)
 
@@ -215,6 +233,107 @@ class TemporalCNNEncoder(nn.Module):
             x = x * mask.unsqueeze(1).float()
 
         x = self.conv(x)
-        x = self.pool(x).squeeze(-1)
+        
+        # Pool: use last timestep
+        x = x[:, :, -1]  # [batch, hidden_dim]
+        
+        # Output projection
+        out = self.output_proj(x)
+        return self.norm(out)
 
-        return x
+
+class TemporalGRUEncoder(nn.Module):
+    """
+    GRU-based temporal encoder.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 64,
+        output_dim: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        bidirectional: bool = False,
+    ):
+        super().__init__()
+
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+
+        self.gru = nn.GRU(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0,
+            batch_first=True,
+            bidirectional=bidirectional,
+        )
+
+        gru_out_dim = hidden_dim * 2 if bidirectional else hidden_dim
+        self.output_proj = nn.Linear(gru_out_dim, output_dim)
+        self.norm = nn.LayerNorm(output_dim)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: [batch, seq_len, input_dim]
+            mask: [batch, seq_len] validity mask
+
+        Returns:
+            [batch, output_dim]
+        """
+        h = self.input_proj(x)  # [batch, seq_len, hidden_dim]
+
+        # GRU encoding
+        output, h_n = self.gru(h)  # output: [batch, seq_len, hidden_dim]
+
+        # Use final hidden state
+        if self.gru.bidirectional:
+            h_final = torch.cat([h_n[-2], h_n[-1]], dim=-1)
+        else:
+            h_final = h_n[-1]
+
+        # Output projection
+        out = self.output_proj(h_final)
+        return self.norm(out)
+
+
+def get_temporal_encoder(
+    encoder_type: str,
+    input_dim: int,
+    hidden_dim: int,
+    output_dim: int,
+    **kwargs
+) -> nn.Module:
+    """
+    Factory function for temporal encoders.
+
+    Args:
+        encoder_type: "transformer", "conv1d", or "gru"
+        input_dim: Per-timestep feature dimension
+        hidden_dim: Hidden dimension for encoder
+        output_dim: Output embedding dimension
+        **kwargs: Additional encoder-specific arguments
+
+    Returns:
+        Temporal encoder module
+    """
+    if encoder_type == "transformer":
+        return TemporalTransformerEncoder(input_dim, hidden_dim, output_dim, **kwargs)
+    elif encoder_type == "conv1d":
+        return TemporalConv1DEncoder(input_dim, hidden_dim, output_dim, **kwargs)
+    elif encoder_type == "gru":
+        return TemporalGRUEncoder(input_dim, hidden_dim, output_dim, **kwargs)
+    else:
+        raise ValueError(f"Unknown temporal encoder type: {encoder_type}. "
+                         f"Choose from: 'transformer', 'conv1d', 'gru'")
+
+
+# Backward compatibility alias
+TemporalCNNEncoder = TemporalConv1DEncoder
+
+

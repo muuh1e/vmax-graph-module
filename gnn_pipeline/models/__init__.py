@@ -41,6 +41,7 @@ def get_model(
     agent_in_channels: int,
     lane_in_channels: int,
     tl_in_channels: int = 12,
+    goal_in_channels: int = 10,
 ) -> BaseMotionPredictor:
     """
     Factory function to create a model from configs.
@@ -51,6 +52,7 @@ def get_model(
         agent_in_channels: Number of agent input features
         lane_in_channels: Number of lane input features
         tl_in_channels: Number of traffic light input features
+        goal_in_channels: Number of goal input features
         
     Returns:
         Instantiated model
@@ -73,10 +75,11 @@ def get_model(
     edge_types = model_config.get_edge_types(graph_config)
     
     # Create model with appropriate arguments
-    model = model_cls(
+    model_kwargs = dict(
         agent_in_channels=agent_in_channels,
         lane_in_channels=lane_in_channels,
         tl_in_channels=tl_in_channels,
+        goal_in_channels=goal_in_channels,
         hidden_channels=model_config.hidden_channels,
         num_layers=model_config.num_layers,
         num_future_steps=model_config.num_future_steps,
@@ -85,7 +88,29 @@ def get_model(
         edge_types=edge_types,
         use_edge_attr=model_config.use_edge_attr,
     )
-    
+
+    # Add temporal encoder params if supported (Phase 2A)
+    if hasattr(model_config, 'use_temporal_encoder'):
+        model_kwargs.update(
+            use_temporal_encoder=model_config.use_temporal_encoder,
+            temporal_encoder_type=model_config.temporal_encoder_type,
+            temporal_hidden_dim=model_config.temporal_hidden_dim,
+            temporal_num_layers=model_config.temporal_num_layers,
+            temporal_num_heads=model_config.temporal_num_heads,
+            temporal_dropout=model_config.temporal_dropout,
+        )
+
+    # Add polyline encoder params if supported (Phase 2C)
+    if hasattr(model_config, 'use_polyline_encoder'):
+        model_kwargs.update(
+            use_polyline_encoder=model_config.use_polyline_encoder,
+            polyline_encoder_type=model_config.polyline_encoder_type,
+            polyline_hidden_dim=model_config.polyline_hidden_dim,
+            polyline_num_layers=model_config.polyline_num_layers,
+        )
+
+    model = model_cls(**model_kwargs)
+
     return model
 
 

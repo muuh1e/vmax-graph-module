@@ -425,6 +425,7 @@ class HierarchicalGNN(BaseMotionPredictor):
         use_edge_attr: bool = False,  # Ignored
         temporal_encoder_type: str = "transformer",
         use_multi_modal: bool = True,
+        **kwargs,  # Accept and ignore extra params (e.g., polyline encoder settings)
     ):
         super().__init__(num_future_steps=num_future_steps)
 

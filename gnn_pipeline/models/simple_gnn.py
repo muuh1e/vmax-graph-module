@@ -44,6 +44,7 @@ class SimpleHeteroGNN(BaseMotionPredictor):
         agent_in_channels: int = 66,
         lane_in_channels: int = 40,
         tl_in_channels: int = 12,
+        goal_in_channels: int = 10,
         hidden_channels: int = 128,
         num_layers: int = 3,
         num_future_steps: int = 80,
@@ -51,12 +52,14 @@ class SimpleHeteroGNN(BaseMotionPredictor):
         conv_type: str = "sage",
         edge_types: Optional[List[Tuple[str, str, str]]] = None,
         use_edge_attr: bool = False,
+        **kwargs,  # Accept and ignore extra params (e.g., temporal/polyline encoder settings)
     ):
         super().__init__(num_future_steps=num_future_steps)
 
         self.agent_in_channels = agent_in_channels
         self.lane_in_channels = lane_in_channels
         self.tl_in_channels = tl_in_channels
+        self.goal_in_channels = goal_in_channels
         self.hidden_channels = hidden_channels
         self.num_layers = num_layers
         self.conv_type = conv_type
@@ -73,12 +76,15 @@ class SimpleHeteroGNN(BaseMotionPredictor):
 
         # Check which node types are needed
         self.has_tl = any("tl" in et for et in edge_types)
+        self.has_goal = any("goal" in et for et in edge_types)
 
         # Input projections
         self.agent_proj = Linear(agent_in_channels, hidden_channels)
         self.lane_proj = Linear(lane_in_channels, hidden_channels)
         if self.has_tl:
             self.tl_proj = Linear(tl_in_channels, hidden_channels)
+        if self.has_goal:
+            self.goal_proj = Linear(goal_in_channels, hidden_channels)
 
         # Build heterogeneous convolution layers
         self.convs = nn.ModuleList()
@@ -96,6 +102,10 @@ class SimpleHeteroGNN(BaseMotionPredictor):
         ])
         if self.has_tl:
             self.tl_norms = nn.ModuleList([
+                nn.LayerNorm(hidden_channels) for _ in range(num_layers)
+            ])
+        if self.has_goal:
+            self.goal_norms = nn.ModuleList([
                 nn.LayerNorm(hidden_channels) for _ in range(num_layers)
             ])
 
@@ -202,6 +212,10 @@ class SimpleHeteroGNN(BaseMotionPredictor):
         if self.has_tl and 'tl' in data.node_types and data['tl'].x.shape[0] > 0:
             x_dict['tl'] = self.tl_proj(data['tl'].x)
 
+        # Handle goal nodes if present
+        if self.has_goal and 'goal' in data.node_types and data['goal'].x.shape[0] > 0:
+            x_dict['goal'] = self.goal_proj(data['goal'].x)
+
         # Build edge_index_dict
         edge_index_dict = self._get_edge_index_dict(data)
 
@@ -235,6 +249,13 @@ class SimpleHeteroGNN(BaseMotionPredictor):
                 x_dict_new['tl'] = x_dict['tl'] + self.dropout(x_dict_new['tl'])
             elif self.has_tl and 'tl' in x_dict:
                 x_dict_new['tl'] = x_dict['tl']
+
+            # Apply normalization/residual for goal
+            if self.has_goal and 'goal' in x_dict_new:
+                x_dict_new['goal'] = self.goal_norms[i](x_dict_new['goal'])
+                x_dict_new['goal'] = x_dict['goal'] + self.dropout(x_dict_new['goal'])
+            elif self.has_goal and 'goal' in x_dict:
+                x_dict_new['goal'] = x_dict['goal']
 
             x_dict = x_dict_new
 
