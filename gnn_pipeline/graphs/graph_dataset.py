@@ -7,7 +7,8 @@ Loads TFRecords and builds heterogeneous graphs using hetero_graph.py.
 """
 
 import os
-from typing import Optional, Callable, TYPE_CHECKING
+import multiprocessing as mp
+from typing import Optional, Callable, List, Tuple, TYPE_CHECKING
 import torch
 from torch_geometric.data import InMemoryDataset, HeteroData, Batch
 from tqdm import tqdm
@@ -25,6 +26,36 @@ def count_tfrecord_examples(tfrecord_path: str) -> int:
     for _ in tf.data.TFRecordDataset(tfrecord_path):
         count += 1
     return count
+
+
+def load_all_raw_records(tfrecord_path: str, max_records: Optional[int] = None) -> List[bytes]:
+    """Load all raw record bytes from a TFRecord in a single sequential pass."""
+    import tensorflow as tf
+    raw_records = []
+    for raw in tf.data.TFRecordDataset([tfrecord_path]):
+        raw_records.append(raw.numpy())
+        if max_records is not None and len(raw_records) >= max_records:
+            break
+    return raw_records
+
+
+def _build_one_graph(args: Tuple) -> Optional[HeteroData]:
+    """Worker function for parallel graph building. Takes (raw_bytes, config_dict)."""
+    raw_bytes, config_dict = args
+    from ..configs import GraphConfig
+    config = GraphConfig.from_dict(config_dict)
+    try:
+        graph = build_hetero_graph(raw_bytes, record_index=0, config=config)
+        # Post-process for batching
+        ego_future = graph.y[graph.ego_idx].clone()
+        ego_future_valid = graph.future_valid[graph.ego_idx].clone()
+        graph.ego_future_target = ego_future
+        graph.ego_future_valid = ego_future_valid
+        graph.ego_idx_tensor = torch.tensor([graph.ego_idx], dtype=torch.long)
+        del graph.a2a_relations
+        return graph
+    except Exception:
+        return None
 
 
 class WaymoGraphDataset(InMemoryDataset):
@@ -89,62 +120,64 @@ class WaymoGraphDataset(InMemoryDataset):
         pass
 
     def process(self):
-        """Process TFRecords and build graphs."""
+        """Process TFRecords and build graphs.
+
+        Uses single-pass I/O + multiprocessing for speed:
+        1. Read all raw record bytes in one sequential pass (avoids O(N^2) re-reads)
+        2. Build graphs in parallel across CPU cores
+        """
         print(f"Processing TFRecord: {self.tfrecord_path}")
         print(f"Graph config: {self.config.describe()}")
 
-        # Count total records
-        total_records = count_tfrecord_examples(self.tfrecord_path)
-        print(f"Total records in TFRecord: {total_records}")
+        # --- Phase 1: Single-pass load of raw bytes ---
+        print("Loading raw records (single pass)...")
+        raw_records = load_all_raw_records(self.tfrecord_path, self.max_records)
+        num_records = len(raw_records)
+        print(f"Loaded {num_records} raw records")
 
-        # Limit if specified
-        num_records = min(total_records, self.max_records) if self.max_records else total_records
-        print(f"Processing {num_records} records...")
+        # --- Phase 2: Build graphs (parallel or sequential) ---
+        num_workers = min(mp.cpu_count(), num_records, 8)
+        config_dict = self.config.to_dict()
 
+        if num_workers > 1 and num_records > 50:
+            print(f"Building graphs with {num_workers} workers...")
+            ctx = mp.get_context("fork")
+            with ctx.Pool(num_workers) as pool:
+                work_items = [(rb, config_dict) for rb in raw_records]
+                results = list(tqdm(
+                    pool.imap(_build_one_graph, work_items, chunksize=32),
+                    total=num_records,
+                    desc="Building graphs",
+                ))
+        else:
+            print("Building graphs (sequential)...")
+            results = []
+            for rb in tqdm(raw_records, desc="Building graphs"):
+                results.append(_build_one_graph((rb, config_dict)))
+
+        # Free raw bytes
+        del raw_records
+
+        # Collect results
         data_list = []
         failed = 0
-
-        for i in tqdm(range(num_records), desc="Building graphs"):
-            try:
-                graph = build_hetero_graph(
-                    self.tfrecord_path, 
-                    i,
-                    config=self.config,
-                )
-
-                # Store ego future target as a separate tensor for easier batching
-                # This will be automatically batched to [batch_size, 80, 2]
-                ego_future = graph.y[graph.ego_idx].clone()  # [80, 2]
-                ego_future_valid = graph.future_valid[graph.ego_idx].clone()  # [80]
-
-                # Store as graph attributes (not nested in node stores)
-                graph.ego_future_target = ego_future
-                graph.ego_future_valid = ego_future_valid
-                graph.ego_idx_tensor = torch.tensor([graph.ego_idx], dtype=torch.long)
-
-                # Remove non-tensor attributes that can't be batched
-                del graph.a2a_relations
-
+        for graph in results:
+            if graph is None:
+                failed += 1
+            else:
                 if self.pre_transform is not None:
                     graph = self.pre_transform(graph)
-
                 data_list.append(graph)
-
-            except Exception as e:
-                failed += 1
-                if failed <= 5:
-                    print(f"\nWarning: Failed to process record {i}: {e}")
-                continue
 
         print(f"\nProcessed {len(data_list)} graphs successfully ({failed} failed)")
 
         # Save as a simple list (no collation)
         torch.save(data_list, self.processed_paths[0])
-        
+
         # Also save the config for reference
         config_path = os.path.join(self.processed_dir, f'config_{self._config_hash}.json')
         self.config.save(config_path)
-        
+
         print("Done!")
 
     def len(self) -> int:

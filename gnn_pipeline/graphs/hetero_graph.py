@@ -1775,7 +1775,12 @@ def build_hetero_graph(
         lane_config = PolylineGrouperConfig()
 
     # Load TFExample
-    example = read_example_from_tfrecord(tfrecord_path, record_index)
+    if isinstance(tfrecord_path, bytes):
+        # Accept pre-loaded raw bytes directly (for parallel processing)
+        import tensorflow as tf
+        example = tf.train.Example.FromString(tfrecord_path)
+    else:
+        example = read_example_from_tfrecord(tfrecord_path, record_index)
     features = example.features.feature
 
     # Get ego state
