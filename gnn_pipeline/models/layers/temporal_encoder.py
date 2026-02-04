@@ -325,9 +325,15 @@ def get_temporal_encoder(
     if encoder_type == "transformer":
         return TemporalTransformerEncoder(input_dim, hidden_dim, output_dim, **kwargs)
     elif encoder_type == "conv1d":
-        return TemporalConv1DEncoder(input_dim, hidden_dim, output_dim, **kwargs)
+        # Filter out transformer-specific kwargs
+        conv_kwargs = {k: v for k, v in kwargs.items()
+                      if k in ['num_layers', 'kernel_size', 'dropout']}
+        return TemporalConv1DEncoder(input_dim, hidden_dim, output_dim, **conv_kwargs)
     elif encoder_type == "gru":
-        return TemporalGRUEncoder(input_dim, hidden_dim, output_dim, **kwargs)
+        # Filter out transformer-specific kwargs
+        gru_kwargs = {k: v for k, v in kwargs.items()
+                     if k in ['num_layers', 'dropout', 'bidirectional']}
+        return TemporalGRUEncoder(input_dim, hidden_dim, output_dim, **gru_kwargs)
     else:
         raise ValueError(f"Unknown temporal encoder type: {encoder_type}. "
                          f"Choose from: 'transformer', 'conv1d', 'gru'")
